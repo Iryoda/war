@@ -43,14 +43,14 @@ var UNITY_BASE_COST = map[UNITY_TYPE]int{
 	SOLDIER: 10,
 }
 var TECH_UPDATE_COST = map[int]int{
-	1: 50,
-	2: 100,
-	3: 200,
+	1: 100,
+	2: 200,
+	3: 400,
 }
 var MINING_LEVEL_COST = map[int]int{
-	1: 50,
-	2: 100,
-	3: 200,
+	1: 100,
+	2: 200,
+	3: 400,
 }
 
 const (
@@ -120,6 +120,7 @@ func CreateField(size int) GameField {
 type Player struct {
 	Id              PLAYER_TYPE
 	Coins           int
+	TotalCoins      int
 	TechnologyLevel int
 	MiningLevel     int
 }
@@ -160,6 +161,7 @@ type GameUpdateEvent struct {
 	Owner            PLAYER_TYPE
 	Time             int
 	Coins            int
+	TotalCoins       int
 	TechLevel        int
 	TechUpdateCost   int
 	MiningLevel      int
@@ -371,6 +373,12 @@ func (g *Game) Update() {
 			fmt.Println("RED WINS")
 			return
 		}
+
+		if uR == 0 && uR == 0 {
+			g.Winner = BLUE
+			fmt.Println("BLUE WINS")
+			return
+		}
 	}
 
 	if g.Field.BorderIsUp && g.DisplayTime > int(FIVE_MINUTES.Seconds()) {
@@ -382,8 +390,16 @@ func (g *Game) Update() {
 		g.ElapsedTime = t
 		g.DisplayTime += 1
 
-		g.PlayerBlue.Coins += g.PlayerRed.CalculateCoinsToReceive()
-		g.PlayerRed.Coins += g.PlayerBlue.CalculateCoinsToReceive()
+		if g.Field.BorderIsUp {
+			cB := g.PlayerBlue.CalculateCoinsToReceive()
+			cR := g.PlayerRed.CalculateCoinsToReceive()
+
+			g.PlayerBlue.Coins += cB
+			g.PlayerBlue.TotalCoins += cB
+
+			g.PlayerRed.Coins += cR
+			g.PlayerRed.TotalCoins += cR
+		}
 
 		if Bus != nil {
 			Bus.Publish(fmt.Sprint("game:", g.ID, "/update"), g.NewGameUpdateEvent(BLUE))
@@ -407,6 +423,7 @@ func (g Game) NewGameUpdateEvent(p PLAYER_TYPE) GameUpdateEvent {
 			UnityCost:        g.GetCurrentUnityCost(SOLDIER),
 			Unities:          len(g.GetUnitiesByPlayerId(BLUE)),
 			EnemyUnities:     len(g.GetUnitiesByPlayerId(RED)),
+			TotalCoins:       g.PlayerBlue.TotalCoins,
 		}
 	}
 
@@ -422,6 +439,7 @@ func (g Game) NewGameUpdateEvent(p PLAYER_TYPE) GameUpdateEvent {
 		UnityCost:        g.GetCurrentUnityCost(SOLDIER),
 		Unities:          len(g.GetUnitiesByPlayerId(RED)),
 		EnemyUnities:     len(g.GetUnitiesByPlayerId(BLUE)),
+		TotalCoins:       g.PlayerRed.TotalCoins,
 	}
 }
 
@@ -475,18 +493,27 @@ func (g *Game) RenderUI() {
 	rl.DrawText(fmt.Sprint("Tech Level Red:", g.PlayerRed.TechnologyLevel), 0, 125, 16, rl.White)
 
 	var aliveUnities = 0
+	var deadUnitites = 0
 	for _, u := range g.Unities {
 		if u.State != DEAD {
 			aliveUnities += 1
 		}
+		if u.State == DEAD {
+			deadUnitites++
+		}
 	}
 
 	rl.DrawText(fmt.Sprint("Unities:", aliveUnities), 0, 145, 16, rl.White)
+	rl.DrawText(fmt.Sprint("Dead Unities:", deadUnitites), 0, 160, 16, rl.White)
 }
 
 func (g *Game) RunWar(time float64) {
 Outer:
 	for i, current := range g.Unities {
+		if current.Hp <= 0 {
+			g.Unities[i].State = DEAD
+		}
+
 		if current.State == DEAD {
 			continue
 		}
@@ -594,6 +621,7 @@ Outer:
 			}
 
 			dmg := g.CalculateUnityDamage(current, target)
+			fmt.Println(current.Id, "Unity Attacked", current.TargetUnityId, "Dmg", dmg)
 			g.ExecuteDamage(target.Id, dmg)
 			g.Unities[i].LastAttackAt = rl.GetTime()
 		}
@@ -710,7 +738,7 @@ func (g *Game) addUnity(t UNITY_TYPE, player PLAYER_TYPE) error {
 			PlayerOwner:           player,
 			Speed:                 1,
 			State:                 IDDLE,
-			AttackCooldownSeconds: 1,
+			AttackCooldownSeconds: 0.5,
 		}
 
 		g.Unities = append(g.Unities, u)
@@ -724,28 +752,24 @@ func (g *Game) InvestMining(id PLAYER_TYPE) error {
 	p := g.GetPlayer(id)
 
 	if p.MiningLevel == 3 {
-		fmt.Println("Max level reached")
 		return nil
 	}
 
 	switch p.MiningLevel {
 	case 1:
 		if p.Coins < MINING_LEVEL_COST[1] {
-			fmt.Println("Investment error")
 			return errors.New("Not enough coins")
 		}
 
 		p.Coins -= MINING_LEVEL_COST[1]
 	case 2:
 		if p.Coins < MINING_LEVEL_COST[2] {
-			fmt.Println("Investment error")
 			return errors.New("Not enough coins")
 		}
 
 		p.Coins -= MINING_LEVEL_COST[2]
 	case 3:
 		if p.Coins < MINING_LEVEL_COST[2] {
-			fmt.Println("Investment error")
 			return errors.New("Not enough coins")
 		}
 
@@ -761,27 +785,23 @@ func (g *Game) InvestTechnology(id PLAYER_TYPE) error {
 	p := g.GetPlayer(id)
 
 	if p.TechnologyLevel == 3 {
-		fmt.Println("Max level reached")
 		return nil
 	}
 
 	switch p.TechnologyLevel {
 	case 1:
 		if p.Coins < TECH_UPDATE_COST[1] {
-			fmt.Println("Investment error")
 			return errors.New("Not enough coins")
 		}
 		p.Coins -= TECH_UPDATE_COST[1]
 	case 2:
 		if p.Coins < TECH_UPDATE_COST[2] {
-			fmt.Println("Investment error")
 			return errors.New("Not enough coins")
 		}
 
 		p.Coins -= TECH_UPDATE_COST[2]
 	case 3:
 		if p.Coins < TECH_UPDATE_COST[3] {
-			fmt.Println("Investment error")
 			return errors.New("Not enough coins")
 		}
 
@@ -876,15 +896,29 @@ func FindClosestEnemyUnity(u Unity, g *Game) Unity {
 }
 
 func (g *Game) CalculateUnityDamage(attacker Unity, target Unity) int {
-	return attacker.Power - target.Defense
+	techAttacker := g.GetPlayerById(attacker.PlayerOwner).TechnologyLevel
+	techTarget := g.GetPlayerById(target.PlayerOwner).TechnologyLevel
+
+	dmg := attacker.Power*techAttacker - target.Defense*techTarget
+
+	if dmg < 0 {
+		return 0
+	}
+
+	return dmg
 }
 
 func (g *Game) ExecuteDamage(unityId int, dmg int) {
 	for i, u := range g.Unities {
 		if u.Id == unityId {
-			g.Unities[i].Hp = u.Hp - dmg
+			tech := g.GetPlayerById(u.PlayerOwner).TechnologyLevel
+			res := (u.Hp * tech) - dmg
 
-			if g.Unities[i].Hp <= 0 {
+			fmt.Println(u.Id, "Hp:", res)
+			g.Unities[i].Hp = res
+
+			if res <= 0 {
+				fmt.Println("Unity", u.Id, "DEAD")
 				g.Unities[i].State = DEAD
 			}
 

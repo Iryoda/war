@@ -1,9 +1,11 @@
 package pkg
 
 import (
+	"encoding/json"
 	"fmt"
 	"math"
 	"math/rand/v2"
+	"time"
 )
 
 // Input Layer
@@ -21,17 +23,20 @@ import (
 // Upgrade Tech -> w0
 // Upgrade Mining -> w1
 // Buy Unity -> w2
-func (e GameUpdateEvent) ToInput() [INPUT_SIZE]int {
-	return [INPUT_SIZE]int{
-		e.Time,
-		e.Coins,
-		e.TechLevel,
-		e.TechUpdateCost,
-		e.MiningLevel,
-		e.MiningUpdateCost,
-		e.Unities,
-		e.EnemyUnities,
-		e.UnityCost,
+func (e GameUpdateEvent) ToInput() [INPUT_SIZE]float64 {
+	normalizedTime := float64(e.Time) / (5 * time.Minute.Seconds())
+	micron := 100.0
+
+	return [INPUT_SIZE]float64{
+		normalizedTime,
+		float64(e.Coins) / micron,
+		float64(e.TechLevel) / 3,
+		float64(e.TechUpdateCost) / micron,
+		float64(e.MiningLevel) / 3,
+		float64(e.MiningUpdateCost) / micron,
+		float64(e.Unities / 100),
+		float64(e.EnemyUnities / 100),
+		float64(e.UnityCost) / micron,
 	}
 }
 
@@ -40,22 +45,21 @@ const HIDDEN_LAYER = 12
 const HIDDEN_LAYER_2 = 5
 const OUTPUT_SIZE = 3
 
-type Input [INPUT_SIZE]int
+type Input [INPUT_SIZE]float64
 type Output [OUTPUT_SIZE]float64
 
 type Model struct {
 	Type PLAYER_TYPE
 	// Input
-	I   []float64
-	B_I []float64
+	W_I_H1 [][]float64
+
 	// Hidden 1
-	H1   []float64
-	B_H1 []float64
+	W_H1_H2 [][]float64
+	B_H1    []float64
 	// Hidden 2
-	H2   []float64
-	B_H2 []float64
+	W_H2_O [][]float64
+	B_H2   []float64
 	// Output
-	O      []float64
 	B_O    []float64
 	Points int
 }
@@ -74,12 +78,12 @@ type Train struct {
 	WinnerPoints int
 }
 
-const GENERATIONS = 10
+const GENERATIONS = 20
 const GAME_PER_GEN = 5
 
 func RunTrain() {
 	trains := map[int][]Train{}
-	var currentBetter Model
+	currentBetter := Model{}
 
 	for gen := range GENERATIONS {
 		// 10 ROUNDS
@@ -93,18 +97,24 @@ func RunTrain() {
 			var mB Model
 			var mR Model
 
-			if currentBetter.Type == "" {
+			if currentBetter.Points == 0 {
+				fmt.Println("Generating Random Models")
 				mB = Model{Type: g.PlayerBlue.Id}
 				mR = Model{Type: g.PlayerRed.Id}
+
 				mB.InitRandom()
 				mR.InitRandom()
 			}
 
 			if currentBetter.Type != "" {
-				mB = currentBetter.Copy()
+				// BLUE
+				m, _ := currentBetter.Copy()
+				mB = *m
 				mB.Mutate(0.2)
 
-				mR = currentBetter.Copy()
+				// RED
+				m, _ = currentBetter.Copy()
+				mR = *m
 				mR.Mutate(0.2)
 			}
 
@@ -114,8 +124,6 @@ func RunTrain() {
 				ModelBlue: &mB,
 				Game:      &g,
 			}
-
-			trains[gen] = append(trains[gen], t)
 
 			// Subs to Event
 			Bus.Subscribe(fmt.Sprint("game:", g.ID, "/update"), func(e GameUpdateEvent) {
@@ -145,28 +153,33 @@ func RunTrain() {
 			points := t.GetWinnerPoints()
 			t.WinnerPoints = points
 
+			if winner == BLUE {
+				mB.Points = points
+			} else {
+				mR.Points = points
+			}
+
+			trains[gen] = append(trains[gen], t)
 			fmt.Println("TRAIN GEN:", gen, "GAME: ", j, "WINNER: ", winner, "TRAIN", t, "POINTS:", points)
 		}
 
-		fmt.Println("TRAIN GEN FINISHED:", gen, trains)
+		fmt.Println("TRAIN GEN FINISHED:", gen, trains[gen])
 
 		for _, v := range trains[gen] {
-			winner := func() Model {
-				if v.Winner == BLUE {
-					return *v.ModelBlue
-				}
-				return *v.ModelRed
-			}()
+			if v.WinnerPoints > currentBetter.Points {
+				fmt.Println("CURRENT UPDATED", v.WinnerPoints)
+				winner := func() Model {
+					if v.Winner == BLUE {
+						return *v.ModelBlue
+					}
+					return *v.ModelRed
+				}()
 
-			if winner.Points > currentBetter.Points {
 				currentBetter = winner
+				continue
 			}
 		}
 	}
-
-	// SELECT BETTER MODELS
-
-	// MUTATE AND DO
 
 	fmt.Println(trains)
 }
@@ -183,7 +196,8 @@ func (t *Train) GetWinnerPoints() int {
 	loser := t.Game.GetPlayerById(enemyId)
 
 	totalUnities := len(t.Game.GetUnitiesByPlayerId(winner.Id))
-	enemyKilledUnities := len(t.Game.GetUnitiesByPlayerId(loser.Id))
+	aliveUnits := len(t.Game.GetAliveUnitiesByPlayerId(winner.Id))
+	enemyTotalUnities := len(t.Game.GetUnitiesByPlayerId(loser.Id))
 
 	techLevel := winner.TechnologyLevel
 	enemyTechLevel := loser.TechnologyLevel
@@ -195,47 +209,55 @@ func (t *Train) GetWinnerPoints() int {
 		return 0
 	}
 
-	return totalUnities*2 + enemyKilledUnities*1 + techLevel*10 + enemyTechLevel*5 + miningLevel*10 + enemyMiningLevel*5
+	return aliveUnits*100 + totalUnities*50 + enemyTotalUnities*10 + techLevel*1000 + enemyTechLevel*100 + miningLevel*1000 + enemyMiningLevel*100 + int(winner.TotalCoins/2) - winner.Coins*10
 }
 
 // Initiate all weights with random numbers from
 // -1.0 to 1.0
 func (m *Model) InitRandom() {
-	// Input Layer
-	for range INPUT_SIZE {
-		m.I = append(m.I, randomFloat(-1.0, 1.0))
-		m.B_I = append(m.B_I, randomFloat(-1.0, 1.0))
-	}
-
-	// Hidden 1
+	// Input
 	for range HIDDEN_LAYER {
-		m.H1 = append(m.H1, randomFloat(-1.0, 1.0))
+		// W I -> H1 [12,9]
+		w := []float64{}
+		for range INPUT_SIZE {
+			// Append [9]float
+			w = append(w, randomFloat(-1.0, 1.0))
+		}
+		// [12][9]float64
+		m.W_I_H1 = append(m.W_I_H1, w)
 		m.B_H1 = append(m.B_H1, randomFloat(-1.0, 1.0))
 	}
 
-	// Hidden 2
 	for range HIDDEN_LAYER_2 {
-		m.H2 = append(m.H2, randomFloat(-1.0, 1.0))
+		// W H1 -> 2 [5, 12]
+		w := []float64{}
+		for range HIDDEN_LAYER {
+			// [12]float
+			w = append(w, randomFloat(-1.0, 1.0))
+		}
+		// [5][12]float
+		m.W_H1_H2 = append(m.W_H1_H2, w)
 		m.B_H2 = append(m.B_H2, randomFloat(-1.0, 1.0))
 	}
 
-	// Output
+	// Hidden 2
 	for range OUTPUT_SIZE {
-		m.O = append(m.O, randomFloat(-1.0, 1.0))
+		// W H2 -> O [5, 3]
+		w := []float64{}
+		for range HIDDEN_LAYER_2 {
+			// [5]float
+			w = append(w, randomFloat(-1.0, 1.0))
+		}
+		// [5][3]float
+		m.W_H2_O = append(m.W_H2_O, w)
 		m.B_O = append(m.B_O, randomFloat(-1.0, 1.0))
 	}
-
-	fmt.Println("Input Layer", m.I, "Bias", m.B_I)
-	fmt.Println("Hidden Layer 1", m.H1, "Bias", m.B_H1)
-	fmt.Println("Hidden Layer 2", m.H2, "Bias", m.B_H2)
-	fmt.Println("Output", m.O)
 }
 
 func (m *Model) HandleUpdate(e GameUpdateEvent) []ACTION {
 	if e.Owner != m.Type {
 		return []ACTION{}
 	}
-	fmt.Println(e)
 
 	input := e.ToInput()
 
@@ -247,58 +269,52 @@ func (m *Model) HandleUpdate(e GameUpdateEvent) []ACTION {
 func OutToAction(out Output) []ACTION {
 	res := []ACTION{}
 
-	if step(out[0]) == 1 {
-		res = append(res, BUY_SOLDIER)
+	if step(out[2]) == 1 {
+		res = append(res, UPDATE_TECH)
 	}
 
 	if step(out[1]) == 1 {
 		res = append(res, UPDATE_MINING)
 	}
 
-	if step(out[2]) == 1 {
-		res = append(res, UPDATE_TECH)
+	if step(out[0]) == 1 {
+		res = append(res, BUY_SOLDIER)
 	}
 
 	return res
 }
 
 func (m Model) Result(input Input) Output {
-	// Input Layer
-	var l0 [INPUT_SIZE]float64
-	for i, w := range m.I {
-		for _, val := range input {
-			l0[i] += w*float64(val) + m.B_I[i]
+	// Input -> H1 Layer
+	var l0 [HIDDEN_LAYER]float64
+	for i, n := range m.W_I_H1 {
+		for j, in := range input {
+			l0[i] += in * n[j]
 		}
 
-		l0[i] = relu(l0[i])
+		l0[i] += m.B_H1[i]
+		l0[i] = math.Tanh(l0[i])
 	}
 
-	// HIDDEN 1
-	var h1 [HIDDEN_LAYER]float64
-	for i, w := range m.H1 {
-		for _, val := range l0 {
-			h1[i] += w*float64(val) + m.B_H1[i]
+	// HIDDEN 1 -> H2
+	var h1 [HIDDEN_LAYER_2]float64
+	for i, n := range m.W_H1_H2 {
+		for j, val := range l0 {
+			h1[i] += n[j] * val
 		}
 
-		h1[i] = relu(h1[i])
-	}
-	// HIDDEN 2
-	var h2 [HIDDEN_LAYER_2]float64
-	for i, w := range m.H2 {
-		for _, val := range h1 {
-			h2[i] += w*float64(val) + m.B_H2[i]
-		}
-
-		h2[i] = relu(h1[i])
+		h1[i] += m.B_H2[i]
+		h1[i] = math.Tanh(h1[i])
 	}
 
-	// Output Layer
+	// HIDDEN 2 -> Out
 	var out [OUTPUT_SIZE]float64
-	for i, w := range m.O {
-		for _, l := range h2 {
-			out[i] += w*l + m.B_O[i]
+	for i, n := range m.W_H2_O {
+		for j, val := range h1 {
+			out[i] += n[j] * float64(val)
 		}
 
+		out[i] += m.B_O[i]
 		out[i] = sigmoid(out[i])
 	}
 
@@ -324,28 +340,43 @@ func relu(x float64) float64 {
 	return math.Max(0.0, x)
 }
 
-func (m Model) Copy() Model {
-	return Model{
-		I:    m.I,
-		B_I:  m.B_I,
-		H1:   m.H1,
-		B_H1: m.B_H1,
-		H2:   m.H2,
-		B_H2: m.B_H2,
-		O:    m.O,
+func (m Model) Copy() (*Model, error) {
+	origJson, err := json.Marshal(m)
+	clone := Model{}
+
+	if err = json.Unmarshal(origJson, &clone); err != nil {
+		return nil, err
 	}
+
+	return &clone, nil
 }
 
 func (m *Model) Mutate(rate float64) {
 	f := func(_ float64) float64 {
-		return randomFloat(-100.0, 100.0)
+		return randomFloat(-1.0, 1.0)
 	}
 
-	m.I = MutateArr(m.I, rate, f)
-	m.B_I = MutateArr(m.B_I, rate, f)
+	arr := [][]float64{}
+	for _, a := range m.W_I_H1 {
+		arr = append(arr, MutateArr(a, rate, f))
+	}
+	m.W_I_H1 = arr
 
-	m.H1 = MutateArr(m.H1, rate, f)
+	arr = [][]float64{}
+	for _, a := range m.W_H1_H2 {
+		arr = append(arr, MutateArr(a, rate, f))
+	}
+	m.W_H1_H2 = arr
 	m.B_H1 = MutateArr(m.B_H1, rate, f)
+
+	arr = [][]float64{}
+	for _, a := range m.W_H2_O {
+		arr = append(arr, MutateArr(a, rate, f))
+	}
+	m.W_H2_O = arr
+	m.B_H2 = MutateArr(m.B_H2, rate, f)
+
+	m.B_O = MutateArr(m.B_O, rate, f)
 }
 
 func MutateArr(arr []float64, rate float64, f func(float64) float64) []float64 {
@@ -353,7 +384,7 @@ func MutateArr(arr []float64, rate float64, f func(float64) float64) []float64 {
 
 	for _, val := range arr {
 		if rand.Float64() < rate {
-			nArr = append(nArr, val)
+			nArr = append(nArr, f(val))
 			continue
 		}
 
