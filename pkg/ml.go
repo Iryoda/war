@@ -79,8 +79,8 @@ type Train struct {
 	WinnerPoints int
 }
 
-const GENERATIONS = 30
-const GAME_PER_GEN = 4
+const GENERATIONS = 10
+const GAME_PER_GEN = 10
 
 func RunTrain() {
 	trains := map[int][]Train{}
@@ -113,12 +113,11 @@ func RunTrain() {
 				// BLUE
 				m, _ := currentBetter.Copy()
 				mB = *m
-				mB.Mutate(0.2)
 
 				// RED
 				m, _ = currentBetter.Copy()
 				mR = *m
-				mR.Mutate(0.2)
+				mR.Mutate(0.3)
 			}
 
 			t := Train{
