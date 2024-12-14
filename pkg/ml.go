@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"math/rand/v2"
+	"os"
 	"time"
 )
 
@@ -78,8 +79,8 @@ type Train struct {
 	WinnerPoints int
 }
 
-const GENERATIONS = 20
-const GAME_PER_GEN = 5
+const GENERATIONS = 30
+const GAME_PER_GEN = 4
 
 func RunTrain() {
 	trains := map[int][]Train{}
@@ -94,7 +95,9 @@ func RunTrain() {
 			})
 			g.Init()
 
+			// Neural Network Blue
 			var mB Model
+			// Neural Network Red
 			var mR Model
 
 			if currentBetter.Points == 0 {
@@ -179,9 +182,26 @@ func RunTrain() {
 				continue
 			}
 		}
+
+		WriteModel(currentBetter, fmt.Sprint("./train/", "gen-", gen, ".json"))
 	}
 
+	WriteModel(currentBetter, "best.json")
+
 	fmt.Println(trains)
+}
+
+func WriteModel(m Model, file string) {
+	fmt.Println("WRITTING CURRENT")
+	res, err := json.Marshal(m)
+	if err != nil {
+		fmt.Errorf(err.Error())
+	}
+
+	err = os.WriteFile(file, res, 0644)
+	if err != nil {
+		fmt.Errorf(err.Error())
+	}
 }
 
 func (t *Train) GetWinnerPoints() int {
@@ -196,20 +216,18 @@ func (t *Train) GetWinnerPoints() int {
 	loser := t.Game.GetPlayerById(enemyId)
 
 	totalUnities := len(t.Game.GetUnitiesByPlayerId(winner.Id))
-	aliveUnits := len(t.Game.GetAliveUnitiesByPlayerId(winner.Id))
+	// aliveUnits := len(t.Game.GetAliveUnitiesByPlayerId(winner.Id))
 	enemyTotalUnities := len(t.Game.GetUnitiesByPlayerId(loser.Id))
 
 	techLevel := winner.TechnologyLevel
-	enemyTechLevel := loser.TechnologyLevel
 
 	miningLevel := winner.MiningLevel
-	enemyMiningLevel := loser.MiningLevel
 
 	if totalUnities == 0 {
 		return 0
 	}
 
-	return aliveUnits*100 + totalUnities*50 + enemyTotalUnities*10 + techLevel*1000 + enemyTechLevel*100 + miningLevel*1000 + enemyMiningLevel*100 + int(winner.TotalCoins/2) - winner.Coins*10
+	return enemyTotalUnities*50 + totalUnities*100 + techLevel*1000 + miningLevel*1000 + int(winner.TotalCoins/2) - winner.Coins*10
 }
 
 // Initiate all weights with random numbers from

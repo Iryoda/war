@@ -44,13 +44,16 @@ var UNITY_BASE_COST = map[UNITY_TYPE]int{
 }
 var TECH_UPDATE_COST = map[int]int{
 	1: 100,
-	2: 200,
-	3: 400,
+	2: 300,
+}
+var TECH_BOOST = map[int]float64{
+	1: 1,
+	2: 1.5,
+	3: 2.2,
 }
 var MINING_LEVEL_COST = map[int]int{
 	1: 100,
-	2: 200,
-	3: 400,
+	2: 300,
 }
 
 const (
@@ -172,16 +175,11 @@ type GameUpdateEvent struct {
 }
 
 func NewGame(args CreateGameArgs) Game {
-	speed := args.Speed
-	if speed == 0 {
-		speed = GAME_SPEED
-	}
-
 	return Game{
 		ID:         uuid.New(),
 		Field:      CreateField(400),
 		Screen:     Screen{Width: 400, Height: 400},
-		Speed:      speed,
+		Speed:      args.Speed,
 		PlayerRed:  *CreatePlayer(RED),
 		PlayerBlue: *CreatePlayer(BLUE),
 		Finished:   false,
@@ -201,6 +199,7 @@ type Tower struct {
 type Unity struct {
 	Id                    int
 	Hp                    int
+	AcumulatedDamage      int
 	Power                 int
 	Defense               int
 	Speed                 int
@@ -209,6 +208,7 @@ type Unity struct {
 	PlayerOwner           PLAYER_TYPE
 	State                 UNITY_STATE
 	TargetUnityId         int
+	TargetUnityIdx        int
 	TargetPosition        Position
 	AttackCooldownSeconds float64
 	LastAttackAt          float64
@@ -217,13 +217,6 @@ type Unity struct {
 type ActionEvent struct {
 	Owner  PLAYER_TYPE
 	Action ACTION
-}
-
-func Run() {
-	g := NewGame(CreateGameArgs{Speed: 8})
-	g.Init()
-
-	RunGame(&g)
 }
 
 func RunGame(g *Game) PLAYER_TYPE {
@@ -529,34 +522,29 @@ Outer:
 			g.Unities[i].TargetPosition = p
 			g.Unities[i].State = MOVING
 		case MOVING:
-			for idx, u := range g.Unities {
+			for _, u := range g.Unities {
 				if u.Id == current.Id || u.State == DEAD {
 					continue
 				}
 
+				t := g.Unities[current.TargetUnityId-1]
+				if t.State == DEAD {
+					g.Unities[i].State = IDDLE
+					continue Outer
+				}
+
 				if rl.CheckCollisionRecs(current.GetCollisionBox(), u.GetCollisionBox()) {
-					if u.PlayerOwner == current.PlayerOwner {
-						target, err := g.GetUnityById(current.TargetUnityId)
-						if err != nil {
-							g.Unities[i].State = IDDLE
-							continue Outer
-						}
-
-						if pos, _, err := g.GetAvailableSurroundPosition(target); err == nil {
-							g.Unities[i].TargetPosition = pos
-						}
-					}
-
 					if u.Id == current.TargetUnityId && u.PlayerOwner != current.PlayerOwner {
 						g.Unities[i].State = COMBAT
 						g.Unities[i].TargetUnityId = u.Id
-
-						g.Unities[idx].State = COMBAT
-						g.Unities[idx].TargetUnityId = current.Id
-
+						continue Outer
 					}
 
-					continue Outer
+					if u.PlayerOwner == current.PlayerOwner {
+						if pos, _, err := g.GetAvailableSurroundPosition(u); err == nil {
+							g.Unities[i].TargetPosition = pos
+						}
+					}
 				}
 
 				xDiff := current.TargetPosition.X - current.Position.X
@@ -603,6 +591,7 @@ Outer:
 
 				u, p, err := g.CalculateUnityNextPosition(g.Unities[i])
 				if err != nil {
+					g.Unities[i].State = IDDLE
 					continue Outer
 				}
 
@@ -621,7 +610,6 @@ Outer:
 			}
 
 			dmg := g.CalculateUnityDamage(current, target)
-			fmt.Println(current.Id, "Unity Attacked", current.TargetUnityId, "Dmg", dmg)
 			g.ExecuteDamage(target.Id, dmg)
 			g.Unities[i].LastAttackAt = rl.GetTime()
 		}
@@ -731,6 +719,7 @@ func (g *Game) addUnity(t UNITY_TYPE, player PLAYER_TYPE) error {
 		u := Unity{
 			Id:                    id,
 			Hp:                    10,
+			AcumulatedDamage:      0,
 			Power:                 7,
 			Defense:               2,
 			Type:                  SOLDIER,
@@ -751,7 +740,7 @@ func (g *Game) addUnity(t UNITY_TYPE, player PLAYER_TYPE) error {
 func (g *Game) InvestMining(id PLAYER_TYPE) error {
 	p := g.GetPlayer(id)
 
-	if p.MiningLevel == 3 {
+	if p.MiningLevel >= 3 {
 		return nil
 	}
 
@@ -762,21 +751,15 @@ func (g *Game) InvestMining(id PLAYER_TYPE) error {
 		}
 
 		p.Coins -= MINING_LEVEL_COST[1]
+		p.MiningLevel++
 	case 2:
 		if p.Coins < MINING_LEVEL_COST[2] {
 			return errors.New("Not enough coins")
 		}
 
 		p.Coins -= MINING_LEVEL_COST[2]
-	case 3:
-		if p.Coins < MINING_LEVEL_COST[2] {
-			return errors.New("Not enough coins")
-		}
-
-		p.Coins -= MINING_LEVEL_COST[3]
+		p.MiningLevel++
 	}
-
-	p.MiningLevel++
 
 	return nil
 }
@@ -784,7 +767,7 @@ func (g *Game) InvestMining(id PLAYER_TYPE) error {
 func (g *Game) InvestTechnology(id PLAYER_TYPE) error {
 	p := g.GetPlayer(id)
 
-	if p.TechnologyLevel == 3 {
+	if p.TechnologyLevel >= 3 {
 		return nil
 	}
 
@@ -794,23 +777,28 @@ func (g *Game) InvestTechnology(id PLAYER_TYPE) error {
 			return errors.New("Not enough coins")
 		}
 		p.Coins -= TECH_UPDATE_COST[1]
+		p.TechnologyLevel++
+		g.ScaleUnitiesTech(id)
 	case 2:
 		if p.Coins < TECH_UPDATE_COST[2] {
 			return errors.New("Not enough coins")
 		}
 
 		p.Coins -= TECH_UPDATE_COST[2]
-	case 3:
-		if p.Coins < TECH_UPDATE_COST[3] {
-			return errors.New("Not enough coins")
-		}
-
-		p.Coins -= TECH_UPDATE_COST[3]
+		p.TechnologyLevel++
+		g.ScaleUnitiesTech(id)
 	}
 
-	p.TechnologyLevel++
-
 	return nil
+}
+
+func (g *Game) ScaleUnitiesTech(id PLAYER_TYPE) {
+	p := g.GetPlayer(id)
+	for i, u := range g.Unities {
+		if u.PlayerOwner == id {
+			g.Unities[i].Hp = 10 * p.TechnologyLevel
+		}
+	}
 }
 
 func (g Game) GetBasePosition(id PLAYER_TYPE) Position {
@@ -899,7 +887,7 @@ func (g *Game) CalculateUnityDamage(attacker Unity, target Unity) int {
 	techAttacker := g.GetPlayerById(attacker.PlayerOwner).TechnologyLevel
 	techTarget := g.GetPlayerById(target.PlayerOwner).TechnologyLevel
 
-	dmg := attacker.Power*techAttacker - target.Defense*techTarget
+	dmg := int(math.Floor(float64(attacker.Power)*TECH_BOOST[techAttacker])) - int(math.Ceil(float64(target.Defense)*TECH_BOOST[techTarget]))
 
 	if dmg < 0 {
 		return 0
@@ -909,21 +897,12 @@ func (g *Game) CalculateUnityDamage(attacker Unity, target Unity) int {
 }
 
 func (g *Game) ExecuteDamage(unityId int, dmg int) {
-	for i, u := range g.Unities {
-		if u.Id == unityId {
-			tech := g.GetPlayerById(u.PlayerOwner).TechnologyLevel
-			res := (u.Hp * tech) - dmg
+	g.Unities[unityId-1].AcumulatedDamage += dmg
+	techBoost := TECH_BOOST[g.GetPlayerById(g.Unities[unityId-1].PlayerOwner).TechnologyLevel]
+	hp := int(math.Floor(float64(g.Unities[unityId-1].Hp)*techBoost)) - g.Unities[unityId-1].AcumulatedDamage
 
-			fmt.Println(u.Id, "Hp:", res)
-			g.Unities[i].Hp = res
-
-			if res <= 0 {
-				fmt.Println("Unity", u.Id, "DEAD")
-				g.Unities[i].State = DEAD
-			}
-
-			break
-		}
+	if hp <= 0 {
+		g.Unities[unityId-1].State = DEAD
 	}
 }
 
@@ -943,23 +922,53 @@ func (g *Game) GetUnityByPosition(p Position) (Unity, error) {
 }
 
 func (g *Game) GetAvailableSurroundPosition(u Unity) (Position, UNITY_SURROUND, error) {
-	front := Position{X: u.Position.X, Y: u.Position.Y + 1}
-	right := Position{X: u.Position.X + 1, Y: u.Position.Y}
-	left := Position{X: u.Position.X - 1, Y: u.Position.Y}
-	back := Position{X: u.Position.X, Y: u.Position.Y - 1}
+	b := u.GetCollisionBox()
 
-	pos := map[UNITY_SURROUND]Position{
+	front := CollisionBox{
+		X:      b.X,
+		Y:      b.Y + float32(UNITY_THICK[u.Type]),
+		Width:  b.Width,
+		Height: b.Height,
+	}
+	back := CollisionBox{
+		X:      b.X,
+		Y:      b.Y - float32(UNITY_THICK[u.Type]),
+		Width:  b.Width,
+		Height: b.Height,
+	}
+	right := CollisionBox{
+		X:      b.X + float32(UNITY_THICK[u.Type]),
+		Y:      b.Y,
+		Width:  b.Width,
+		Height: b.Height,
+	}
+	left := CollisionBox{
+		X:      b.X - float32(UNITY_THICK[u.Type]),
+		Y:      b.Y,
+		Width:  b.Width,
+		Height: b.Height,
+	}
+
+	pos := map[UNITY_SURROUND]CollisionBox{
 		FRONT: front,
 		RIGHT: right,
 		LEFT:  left,
 		BACK:  back,
 	}
 
+POS:
 	for k, p := range pos {
-		if !g.isPositionOverBorder(p) {
-			if _, err := g.GetUnityByPosition(p); err == nil {
-				return front, k, nil
+		if !g.isPositionOverBorder(Position{X: int(p.X), Y: int(p.Y)}) {
+			for _, u := range g.Unities {
+				if rl.CheckCollisionRecs(p, u.GetCollisionBox()) {
+					continue POS
+				}
 			}
+
+			return Position{
+				X: int(p.X),
+				Y: int(p.Y),
+			}, k, nil
 		}
 	}
 
